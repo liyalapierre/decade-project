@@ -473,6 +473,8 @@ sum(df$female_needed) + sum(df$baa_needed) + sum(df$aian_needed) + sum(df$asian_
 
 ## Creating the change from 2018 dataset
 
+Choose "Firms_2018.xslx"
+
 ```{r}
 df_change <- read_excel(file.choose())
 
