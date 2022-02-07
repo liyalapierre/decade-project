@@ -1,0 +1,886 @@
+---
+title: "Compiling_Info"
+author: "Liya LaPierre"
+date: "1/25/2022"
+output: html_document
+---
+
+# Packages
+
+```{r}
+library(tidyverse)
+library(readxl)
+```
+
+# Datasets
+
+## Firms dataset
+
+Choose "Firms.csv"
+
+Note: When the census marked a value as "S", there was a concern with high sampling variability/estimate quality. We attributed this to low sample size. When the census marked a value as "D", there was a concern with disclosing data for individual companies. Again, this appears to mean that there were too few respondents. Therefore, for both of these values, we are marking them as NA. 
+
+```{r}
+firms <- read.csv(file.choose(), na.strings = c("S", "D")) %>%
+  rename(
+    state = Geographic.Area.Name..NAME.,
+    naics_code = X2017.NAICS.code..NAICS2017.,
+    naics_label = Meaning.of.NAICS.code..NAICS2017_LABEL.,
+    sex_label = Meaning.of.Sex.code..SEX_LABEL.,
+    ethnicity_label = Meaning.of.Ethnicity.code..ETH_GROUP_LABEL.,
+    race_label = Meaning.of.Race.code..RACE_GROUP_LABEL.,
+    vet_label = Meaning.of.Veteran.code..VET_GROUP_LABEL.,
+    year = Year..YEAR.,
+    employer_firms = Number.of.employer.firms..FIRMPDEMP.,
+    sales = Sales..value.of.shipments..or.revenue.of.employer.firms...1.000...RCPPDEMP.,
+    employees = Number.of.employees..EMP.,
+    annual_payroll = Annual.payroll...1.000...PAYANN.,
+    st_err_employer_firms = Relative.standard.error.of.employer.firms......FIRMPDEMP_S.,
+    st_err_sales = Relative.standard.error.of.sales..value.of.shipments..or.revenue.of.employer.firms......RCPPDEMP_S.,
+    st_err_employees = Relative.standard.error.of.number.of.employees......EMP_S.,
+    st_err_payroll = Relative.standard.error.of.annual.payroll......PAYANN_S.) %>%
+  select(c(state, naics_code, naics_label, sex_label, ethnicity_label, race_label, vet_label, employer_firms))
+
+head(firms)
+```
+
+Now, our decision for setting NA to 0 comes from our assumption that if the data was marked as S or D, there were a very small number of respondents, possibly close to 0. This was a judgement call, and it is likely that some of these values are not actually 0. 
+
+```{r}
+firms$employer_firms[is.na(firms$employer_firms)] <- 0 # setting NA firms to 0 firms
+firms$employer_firms <- gsub(",", "", firms$employer_firms) # removing commas from values
+firms$employer_firms <- as.integer(firms$employer_firms) # making this column into an integer so we can perform operations
+
+head(firms)
+```
+
+## Population dataset
+
+Choose "Population.csv"
+
+```{r}
+pop <- read.csv(file.choose()) %>%
+  rename(
+    geo_level = SUMLEV,
+    region_code = REGION,
+    division_code = DIVISION,
+    state_fips_code = STATE,
+    state = NAME,
+    sex = SEX,
+    hispanic = ORIGIN,
+    race = RACE,
+    age = AGE, 
+    census_2010 = CENSUS2010POP,
+    base_2010 = ESTIMATESBASE2010,
+    pop_2010 = POPESTIMATE2010,
+    pop_2011 = POPESTIMATE2011,
+    pop_2012 = POPESTIMATE2012,
+    pop_2013 = POPESTIMATE2013,
+    pop_2014 = POPESTIMATE2014,
+    pop_2015 = POPESTIMATE2015,
+    pop_2016 = POPESTIMATE2016,
+    pop_2017 = POPESTIMATE2017,
+    pop_2018 = POPESTIMATE2018,
+    pop_2019 = POPESTIMATE2019) %>%
+  select(-c(state_fips_code, geo_level, region_code, division_code, census_2010, base_2010, pop_2010, pop_2011, pop_2012, pop_2013, pop_2014, pop_2015, pop_2016, pop_2017, pop_2018))
+
+head(pop)
+```
+
+## Creating our combined dataset for # of firms
+
+```{r}
+state <- data.frame(state = unique(pop$state))
+
+total_firms <- firms[which(firms$naics_code == "00" & firms$sex_label == "Total" & firms$ethnicity_label == "Total" & firms$race_label == "Total" & firms$vet_label == "Total"), c(1, 8)]
+
+total_pop <- pop[which(pop$sex == 0 & pop$hispanic == 0),] %>% 
+  group_by(state) %>%
+  summarise(total_pop = sum(pop_2019), .groups = "rowwise")
+
+basic_df <- state %>%
+  inner_join(total_firms, by = "state") %>%
+  inner_join(total_pop, by = "state")
+
+basic_df <- basic_df %>%
+  rename("total_firms" = "employer_firms")
+
+df <- basic_df
+
+head(basic_df)
+```
+
+### Adding Female data
+
+```{r}
+# new table with state and # of female firms in that state
+num_firms <- firms[which(firms$sex_label == "Female" & firms$naics_code == "00" & firms$ethnicity_label == "Total" & firms$race_label == "Total" & firms$vet_label == "Total"), c(1, 8)] %>%
+  rename(female_firms = employer_firms)
+
+# new table with state and # of females in that state
+num_pop <- pop[which(pop$sex == 2 & pop$hispanic == 0),] %>% 
+  group_by(state) %>%
+  summarise(female_pop = sum(pop_2019), .groups = "rowwise")
+
+# adding the columns from table above to our main data frame
+df <- df %>%
+  left_join(num_firms, by = "state") %>%
+  left_join(num_pop, by = "state")
+
+# calculating the other variables we need
+df$female_firm_prop <- df$female_firms / df$total_firms 
+df$female_pop_prop <- df$female_pop / df$total_pop
+df$female_target <- df$female_pop_prop * df$total_firms # target is # of firms if representation in firms matched the population proportion
+df$female_needed <- ifelse(df$female_target > df$female_firms, df$female_target - df$female_firms, 0) # 0 needed if target is above # firms
+df$female_progress <- ifelse(df$female_needed == 0, 1, df$female_firm_prop / df$female_pop_prop) # progress prop is 1 if no firms needed
+df$female_met <- ifelse(df$female_needed > 0, "No", "Yes")
+
+head(df)
+```
+
+### Adding Female x Hispanic data
+
+```{r}
+# new table with state and # of Hispanic female firms in that state
+num_firms <- firms[which(firms$sex_label == "Female" & firms$naics_code == "00" & firms$ethnicity_label == "Hispanic" & firms$race_label == "Total" & firms$vet_label == "Total"), c(1, 8)] %>%
+  rename(female_hisp_firms = employer_firms)
+
+# new table with state and # of Hispanic females in that state
+num_pop <- pop[which(pop$sex == 2 & pop$hispanic == 2),] %>% 
+  group_by(state) %>%
+  summarise(female_hisp_pop = sum(pop_2019), .groups = "rowwise")
+
+# adding the columns from table above to our main data frame
+df <- df %>%
+  left_join(num_firms, by = "state") %>%
+  left_join(num_pop, by = "state")
+
+# calculating the other variables we need
+df$female_hisp_firm_prop <- df$female_hisp_firms / df$total_firms 
+df$female_hisp_pop_prop <- df$female_hisp_pop / df$total_pop
+df$female_hisp_target <- df$female_hisp_pop_prop * df$total_firms # target is # of firms if representation in firms matched the population proportion
+df$female_hisp_needed <- ifelse(df$female_hisp_target > df$female_hisp_firms, df$female_hisp_target - df$female_hisp_firms, 0) # 0 needed if target is above # firms
+df$female_hisp_progress <- ifelse(df$female_hisp_needed == 0, 1, df$female_hisp_firm_prop / df$female_hisp_pop_prop) # progress prop is 1 if no firms needed
+df$female_hisp_met <- ifelse(df$female_hisp_needed > 0, "No", "Yes")
+
+head(df)
+```
+
+### Adding Hispanic data
+
+```{r}
+# new table with state and # of Hispanic firms in that state
+num_firms <- firms[which(firms$sex_label == "Total" & firms$naics_code == "00" & firms$ethnicity_label == "Hispanic" & firms$race_label == "Total" & firms$vet_label == "Total"), c(1, 8)] %>%
+  rename(hisp_firms = employer_firms)
+
+# new table with state and # of Hispanic people in that state
+num_pop <- pop[which(pop$sex == 0 & pop$hispanic == 2),] %>% 
+  group_by(state) %>%
+  summarise(hisp_pop = sum(pop_2019), .groups = "rowwise")
+
+# adding the columns from table above to our main data frame
+df <- df %>%
+  left_join(num_firms, by = "state") %>%
+  left_join(num_pop, by = "state")
+
+# calculating the other variables we need
+df$hisp_firm_prop <- df$hisp_firms / df$total_firms 
+df$hisp_pop_prop <- df$hisp_pop / df$total_pop
+df$hisp_target <- df$hisp_pop_prop * df$total_firms # target is # of firms if representation in firms matched the population proportion
+df$hisp_needed <- ifelse(df$hisp_target > df$hisp_firms, df$hisp_target - df$hisp_firms, 0) # 0 needed if target is above # firms
+df$hisp_progress <- ifelse(df$hisp_needed == 0, 1, df$hisp_firm_prop / df$hisp_pop_prop) # progress prop is 1 if no firms needed
+df$hisp_met <- ifelse(df$hisp_needed > 0, "No", "Yes")
+
+head(df)
+```
+
+### Adding Female x Black or African American data
+
+```{r}
+# new table with state and # of Black/African American female firms in that state
+num_firms <- firms[which(firms$sex_label == "Female" & firms$naics_code == "00" & firms$ethnicity_label == "Total" & firms$race_label == "Black or African American" & firms$vet_label == "Total"), c(1, 8)] %>%
+  rename(female_baa_firms = employer_firms)
+
+# new table with state and # of Black/African American females in that state
+num_pop <- pop[which(pop$sex == 2 & pop$hispanic == 0 & pop$race == 2),] %>% 
+  group_by(state) %>%
+  summarise(female_baa_pop = sum(pop_2019), .groups = "rowwise")
+
+# adding the columns from table above to our main data frame
+df <- df %>%
+  left_join(num_firms, by = "state") %>%
+  left_join(num_pop, by = "state")
+
+# some NAs appeared, so setting those to 0
+df$female_baa_firms[is.na(df$female_baa_firms)] <- 0
+
+# calculating the other variables we need
+df$female_baa_firm_prop <- df$female_baa_firms / df$total_firms 
+df$female_baa_pop_prop <- df$female_baa_pop / df$total_pop
+df$female_baa_target <- df$female_baa_pop_prop * df$total_firms # target is # of firms if representation in firms matched the population proportion
+df$female_baa_needed <- ifelse(df$female_baa_target > df$female_baa_firms, df$female_baa_target - df$female_baa_firms, 0) # 0 needed if target is above # firms
+df$female_baa_progress <- ifelse(df$female_baa_needed == 0, 1, df$female_baa_firm_prop / df$female_baa_pop_prop) # progress prop is 1 if no firms needed
+df$female_baa_met <- ifelse(df$female_baa_needed > 0, "No", "Yes")
+
+head(df)
+```
+
+### Adding Black or African American data
+
+```{r}
+# new table with state and # of Black/African American firms in that state
+num_firms <- firms[which(firms$sex_label == "Total" & firms$naics_code == "00" & firms$ethnicity_label == "Total" & firms$race_label == "Black or African American" & firms$vet_label == "Total"), c(1, 8)] %>%
+  rename(baa_firms = employer_firms)
+
+# new table with state and # of Black/African American people in that state
+num_pop <- pop[which(pop$sex == 0 & pop$hispanic == 0 & pop$race == 2),] %>% 
+  group_by(state) %>%
+  summarise(baa_pop = sum(pop_2019), .groups = "rowwise")
+
+# adding the columns from table above to our main data frame
+df <- df %>%
+  left_join(num_firms, by = "state") %>%
+  left_join(num_pop, by = "state")
+
+# calculating the other variables we need
+df$baa_firm_prop <- df$baa_firms / df$total_firms 
+df$baa_pop_prop <- df$baa_pop / df$total_pop
+df$baa_target <- df$baa_pop_prop * df$total_firms # target is # of firms if representation in firms matched the population proportion
+df$baa_needed <- ifelse(df$baa_target > df$baa_firms, df$baa_target - df$baa_firms, 0) # 0 needed if target is above # firms
+df$baa_progress <- ifelse(df$baa_needed == 0, 1, df$baa_firm_prop / df$baa_pop_prop) # progress prop is 1 if no firms needed
+df$baa_met <- ifelse(df$baa_needed > 0, "No", "Yes")
+
+head(df)
+```
+
+### Adding Female x American Indian and Alaska Native data
+
+```{r}
+# new table with state and # of American Indian/Alaska Native female firms in that state
+num_firms <- firms[which(firms$sex_label == "Female" & firms$naics_code == "00" & firms$ethnicity_label == "Total" & firms$race_label == "American Indian and Alaska Native" & firms$vet_label == "Total"), c(1, 8)] %>%
+  rename(female_aian_firms = employer_firms)
+
+# new table with state and # of American Indian/Alaska Native females in that state
+num_pop <- pop[which(pop$sex == 2 & pop$hispanic == 0 & pop$race == 3),] %>% 
+  group_by(state) %>%
+  summarise(female_aian_pop = sum(pop_2019), .groups = "rowwise")
+
+# adding the columns from table above to our main data frame
+df <- df %>%
+  left_join(num_firms, by = "state") %>%
+  left_join(num_pop, by = "state")
+
+# calculating the other variables we need
+df$female_aian_firm_prop <- df$female_aian_firms / df$total_firms 
+df$female_aian_pop_prop <- df$female_aian_pop / df$total_pop
+df$female_aian_target <- df$female_aian_pop_prop * df$total_firms # target is # of firms if representation in firms matched the population proportion
+df$female_aian_needed <- ifelse(df$female_aian_target > df$female_aian_firms, df$female_aian_target - df$female_aian_firms, 0) # 0 needed if target is above # firms
+df$female_aian_progress <- ifelse(df$female_aian_needed == 0, 1, df$female_aian_firm_prop / df$female_aian_pop_prop) # progress prop is 1 if no firms needed
+df$female_aian_met <- ifelse(df$female_aian_needed > 0, "No", "Yes")
+
+head(df)
+```
+
+### Adding American Indian and Alaska Native data
+
+```{r}
+# new table with state and # of American Indian/Alaska Native firms in that state
+num_firms <- firms[which(firms$sex_label == "Total" & firms$naics_code == "00" & firms$ethnicity_label == "Total" & firms$race_label == "American Indian and Alaska Native" & firms$vet_label == "Total"), c(1, 8)] %>%
+  rename(aian_firms = employer_firms)
+
+# new table with state and # of American Indian/Alaska Native people in that state
+num_pop <- pop[which(pop$sex == 0 & pop$hispanic == 0 & pop$race == 3),] %>% 
+  group_by(state) %>%
+  summarise(aian_pop = sum(pop_2019), .groups = "rowwise")
+
+# adding the columns from table above to our main data frame
+df <- df %>%
+  left_join(num_firms, by = "state") %>%
+  left_join(num_pop, by = "state")
+
+# calculating the other variables we need
+df$aian_firm_prop <- df$aian_firms / df$total_firms 
+df$aian_pop_prop <- df$aian_pop / df$total_pop
+df$aian_target <- df$aian_pop_prop * df$total_firms # target is # of firms if representation in firms matched the population proportion
+df$aian_needed <- ifelse(df$aian_target > df$aian_firms, df$aian_target - df$aian_firms, 0) # 0 needed if target is above # firms
+df$aian_progress <- ifelse(df$aian_needed == 0, 1, df$aian_firm_prop / df$aian_pop_prop) # progress prop is 1 if no firms needed
+df$aian_met <- ifelse(df$aian_needed > 0, "No", "Yes")
+
+head(df)
+```
+
+### Adding Female x Asian data
+
+```{r}
+# new table with state and # of Asian female firms in that state
+num_firms <- firms[which(firms$sex_label == "Female" & firms$naics_code == "00" & firms$ethnicity_label == "Total" & firms$race_label == "Asian" & firms$vet_label == "Total"), c(1, 8)] %>%
+  rename(female_asian_firms = employer_firms)
+
+# new table with state and # of Asian females in that state
+num_pop <- pop[which(pop$sex == 2 & pop$hispanic == 0 & pop$race == 4),] %>% 
+  group_by(state) %>%
+  summarise(female_asian_pop = sum(pop_2019), .groups = "rowwise")
+
+# adding the columns from table above to our main data frame
+df <- df %>%
+  left_join(num_firms, by = "state") %>%
+  left_join(num_pop, by = "state")
+
+# calculating the other variables we need
+df$female_asian_firm_prop <- df$female_asian_firms / df$total_firms 
+df$female_asian_pop_prop <- df$female_asian_pop / df$total_pop
+df$female_asian_target <- df$female_asian_pop_prop * df$total_firms # target is # of firms if representation in firms matched the population proportion
+df$female_asian_needed <- ifelse(df$female_asian_target > df$female_asian_firms, df$female_asian_target - df$female_asian_firms, 0) # 0 needed if target is above # firms
+df$female_asian_progress <- ifelse(df$female_asian_needed == 0, 1, df$female_asian_firm_prop / df$female_asian_pop_prop) # progress prop is 1 if no firms needed
+df$female_asian_met <- ifelse(df$female_asian_needed > 0, "No", "Yes")
+
+head(df)
+```
+
+### Adding Asian data
+
+```{r}
+# new table with state and # of Asian firms in that state
+num_firms <- firms[which(firms$sex_label == "Total" & firms$naics_code == "00" & firms$ethnicity_label == "Total" & firms$race_label == "Asian" & firms$vet_label == "Total"), c(1, 8)] %>%
+  rename(asian_firms = employer_firms)
+
+# new table with state and # of Asian people in that state
+num_pop <- pop[which(pop$sex == 0 & pop$hispanic == 0 & pop$race == 4),] %>% 
+  group_by(state) %>%
+  summarise(asian_pop = sum(pop_2019), .groups = "rowwise")
+
+# adding the columns from table above to our main data frame
+df <- df %>%
+  left_join(num_firms, by = "state") %>%
+  left_join(num_pop, by = "state")
+
+# calculating the other variables we need
+df$asian_firm_prop <- df$asian_firms / df$total_firms 
+df$asian_pop_prop <- df$asian_pop / df$total_pop
+df$asian_target <- df$asian_pop_prop * df$total_firms # target is # of firms if representation in firms matched the population proportion
+df$asian_needed <- ifelse(df$asian_target > df$asian_firms, df$asian_target - df$asian_firms, 0) # 0 needed if target is above # firms
+df$asian_progress <- ifelse(df$asian_needed == 0, 1, df$asian_firm_prop / df$asian_pop_prop) # progress prop is 1 if no firms needed
+df$asian_met <- ifelse(df$asian_needed > 0, "No", "Yes")
+
+head(df)
+```
+
+### Adding Female x Native Hawaiian and Other Pacific Islander data
+
+```{r}
+# new table with state and # of Native Hawaiian/Pacific Islander female firms in that state
+num_firms <- firms[which(firms$sex_label == "Female" & firms$naics_code == "00" & firms$ethnicity_label == "Total" & firms$race_label == "Native Hawaiian and Other Pacific Islander" & firms$vet_label == "Total"), c(1, 8)] %>%
+  rename(female_nhpi_firms = employer_firms)
+
+# new table with state and # of Native Hawaiian/Pacific Islander females in that state
+num_pop <- pop[which(pop$sex == 2 & pop$hispanic == 0 & pop$race == 5),] %>% 
+  group_by(state) %>%
+  summarise(female_nhpi_pop = sum(pop_2019), .groups = "rowwise")
+
+# adding the columns from table above to our main data frame
+df <- df %>%
+  left_join(num_firms, by = "state") %>%
+  left_join(num_pop, by = "state")
+
+# some NAs appeared, so setting those to 0
+df$female_nhpi_firms[is.na(df$female_nhpi_firms)] <- 0
+
+# calculating the other variables we need
+df$female_nhpi_firm_prop <- df$female_nhpi_firms / df$total_firms 
+df$female_nhpi_pop_prop <- df$female_nhpi_pop / df$total_pop
+df$female_nhpi_target <- df$female_nhpi_pop_prop * df$total_firms # target is # of firms if representation in firms matched the population proportion
+df$female_nhpi_needed <- ifelse(df$female_nhpi_target > df$female_nhpi_firms, df$female_nhpi_target - df$female_nhpi_firms, 0) # 0 needed if target is above # firms
+df$female_nhpi_progress <- ifelse(df$female_nhpi_needed == 0, 1, df$female_nhpi_firm_prop / df$female_nhpi_pop_prop) # progress prop is 1 if no firms needed
+df$female_nhpi_met <- ifelse(df$female_nhpi_needed > 0, "No", "Yes")
+
+head(df)
+```
+
+### Native Hawaiian and Other Pacific Islander data
+
+```{r}
+# new table with state and # of Native Hawaiian/Pacific Islander firms in that state
+num_firms <- firms[which(firms$sex_label == "Total" & firms$naics_code == "00" & firms$ethnicity_label == "Total" & firms$race_label == "Native Hawaiian and Other Pacific Islander" & firms$vet_label == "Total"), c(1, 8)] %>%
+  rename(nhpi_firms = employer_firms)
+
+# new table with state and # of Native Hawaiian/Pacific Islander people in that state
+num_pop <- pop[which(pop$sex == 0 & pop$hispanic == 0 & pop$race == 5),] %>% 
+  group_by(state) %>%
+  summarise(nhpi_pop = sum(pop_2019), .groups = "rowwise")
+
+# adding the columns from table above to our main data frame
+df <- df %>%
+  left_join(num_firms, by = "state") %>%
+  left_join(num_pop, by = "state")
+
+# some NAs appeared with this one, so we're setting them to 0 like the others
+df$nhpi_firms[is.na(df$nhpi_firms)] <- 0
+
+# calculating the other variables we need
+df$nhpi_firm_prop <- df$nhpi_firms / df$total_firms 
+df$nhpi_pop_prop <- df$nhpi_pop / df$total_pop
+df$nhpi_target <- df$nhpi_pop_prop * df$total_firms # target is # of firms if representation in firms matched the population proportion
+df$nhpi_needed <- ifelse(df$nhpi_target > df$nhpi_firms, df$nhpi_target - df$nhpi_firms, 0) # 0 needed if target is above # firms
+df$nhpi_progress <- ifelse(df$nhpi_needed == 0, 1, df$nhpi_firm_prop / df$nhpi_pop_prop) # progress prop is 1 if no firms needed
+df$nhpi_met <- ifelse(df$nhpi_needed > 0, "No", "Yes")
+
+head(df)
+```
+
+```{r}
+write.csv(df, "/Users/liya/Desktop/Decade Project/tableau.csv", row.names = FALSE)
+```
+
+## Getting total needed value
+
+First creating a new data frame with White Hispanic Male info
+
+```{r}
+df2 <- basic_df
+```
+
+```{r}
+# new table with state and # of White Hispanic Male firms in that state
+num_firms <- firms[which(firms$sex_label == "Male" & firms$naics_code == "00" & firms$ethnicity_label == "Hispanic" & firms$race_label == "White" & firms$vet_label == "Total"), c(1, 8)] %>%
+  rename(white_hisp_firms = employer_firms)
+
+# new table with state and # of White Hispanic Male people in that state
+num_pop <- pop[which(pop$sex == 1 & pop$hispanic == 2 & pop$race == 1),] %>% 
+  group_by(state) %>%
+  summarise(white_hisp_pop = sum(pop_2019), .groups = "rowwise")
+
+# adding the columns from table above to our main data frame
+df2 <- df2 %>%
+  left_join(num_firms, by = "state") %>%
+  left_join(num_pop, by = "state")
+
+# calculating the other variables we need
+df2$white_hisp_firm_prop <- df2$white_hisp_firms / df2$total_firms 
+df2$white_hisp_pop_prop <- df2$white_hisp_pop / df2$total_pop
+df2$white_hisp_target <- df2$white_hisp_pop_prop * df2$total_firms # target is # of firms if representation in firms matched the population proportion
+df2$white_hisp_needed <- ifelse(df2$white_hisp_target > df2$white_hisp_firms, df2$white_hisp_target - df2$white_hisp_firms, 0) # 0 needed if target is above # firms
+df2$white_hisp_progress <- ifelse(df2$white_hisp_needed == 0, 1, df2$white_hisp_firm_prop / df2$white_hisp_pop_prop) # progress prop is 1 if no firms needed
+df2$white_hisp_met <- ifelse(df2$white_hisp_needed > 0, "No", "Yes")
+
+head(df2)
+```
+
+Total firms needed:
+
+```{r}
+sum(df$female_needed) + sum(df$baa_needed) + sum(df$aian_needed) + sum(df$asian_needed) + sum(df$nhpi_needed) + sum(df2$white_hisp_needed) - sum(df$female_baa_needed) - sum(df$female_aian_needed) - sum(df$female_asian_needed) - sum(df$female_nhpi_needed) 
+```
+
+## Creating the change from 2018 dataset
+
+```{r}
+df_change <- read_excel(file.choose())
+
+df_change <- df_change %>%
+  inner_join(df, by = "state")
+
+head(df_change)
+```
+
+Change in # of firms:
+
+```{r}
+# for each category, calculate the change in number of firms from 2018 to 2019 (firms 2019 - firms2018)
+df_change$female_diff <- df_change$female_firms - df_change$female_firms_2018
+df_change$female_hisp_diff <- df_change$female_hisp_firms - df_change$female_hisp_firms_2018
+df_change$hisp_diff <- df_change$hisp_firms - df_change$hisp_firms_2018
+df_change$female_baa_diff <- df_change$female_baa_firms - df_change$female_baa_firms_2018
+df_change$baa_diff <- df_change$baa_firms - df_change$baa_firms_2018
+df_change$female_aian_diff <- df_change$female_aian_firms - df_change$female_aian_firms_2018
+df_change$aian_diff <- df_change$aian_firms - df_change$aian_firms_2018
+df_change$female_asian_diff <- df_change$female_asian_firms - df_change$female_asian_firms_2018
+df_change$asian_diff <- df_change$asian_firms - df_change$asian_firms_2018
+df_change$female_nhpi_diff <- df_change$female_nhpi_firms - df_change$female_nhpi_firms_2018
+df_change$nhpi_diff <- df_change$nhpi_firms - df_change$nhpi_firms_2018
+```
+
+Progress toward target, 2018:
+
+```{r}
+# for each category, calculate the proportion of how close we were to the target in 2018 (1 if we have already met the target)
+df_change$female_progress_2018 <- ifelse(df_change$female_firms_2018/df_change$female_target > 1, 1, df_change$female_firms_2018/df_change$female_target)
+
+df_change$female_hisp_progress_2018 <- ifelse(df_change$female_hisp_firms_2018/df_change$female_hisp_target > 1, 1, df_change$female_hisp_firms_2018/df_change$female_hisp_target)
+
+df_change$hisp_progress_2018 <- ifelse(df_change$hisp_firms_2018/df_change$hisp_target > 1, 1, df_change$hisp_firms_2018/df_change$hisp_target)
+
+df_change$female_baa_progress_2018 <- ifelse(df_change$female_baa_firms_2018/df_change$female_baa_target > 1, 1, df_change$female_baa_firms_2018/df_change$female_baa_target)
+
+df_change$baa_progress_2018 <- ifelse(df_change$baa_firms_2018/df_change$baa_target > 1, 1, df_change$baa_firms_2018/df_change$baa_target)
+
+df_change$female_aian_progress_2018 <- ifelse(df_change$female_aian_firms_2018/df_change$female_aian_target > 1, 1, df_change$female_aian_firms_2018/df_change$female_aian_target)
+
+df_change$aian_progress_2018 <- ifelse(df_change$aian_firms_2018/df_change$aian_target > 1, 1, df_change$aian_firms_2018/df_change$aian_target)
+
+df_change$female_asian_progress_2018 <- ifelse(df_change$female_asian_firms_2018/df_change$female_asian_target > 1, 1, df_change$female_asian_firms_2018/df_change$female_asian_target)
+
+df_change$asian_progress_2018 <- ifelse(df_change$asian_firms_2018/df_change$asian_target > 1, 1, df_change$asian_firms_2018/df_change$asian_target)
+
+df_change$female_nhpi_progress_2018 <- ifelse(df_change$female_nhpi_firms_2018/df_change$female_nhpi_target > 1, 1, df_change$female_nhpi_firms_2018/df_change$female_nhpi_target)
+
+df_change$nhpi_progress_2018 <- ifelse(df_change$nhpi_firms_2018/df_change$nhpi_target > 1, 1, df_change$nhpi_firms_2018/df_change$nhpi_target)
+```
+
+Percent change in progress toward target from 2018 to 2019:
+
+```{r}
+# for each category, calculate the percent change in progress from 2018 to 2019 (% in 2019 - % in 2018)
+df_change$diff_female_progress <- df_change$female_progress - df_change$female_progress_2018
+df_change$diff_female_hisp_progress <- df_change$female_hisp_progress - df_change$female_hisp_progress_2018
+df_change$diff_hisp_progress <- df_change$hisp_progress - df_change$hisp_progress_2018
+df_change$diff_female_baa_progress <- df_change$female_baa_progress - df_change$female_baa_progress_2018
+df_change$diff_baa_progress <- df_change$baa_progress - df_change$baa_progress_2018
+df_change$diff_female_aian_progress <- df_change$female_aian_progress - df_change$female_aian_progress_2018
+df_change$diff_aian_progress <- df_change$aian_progress - df_change$aian_progress_2018
+df_change$diff_female_asian_progress <- df_change$female_asian_progress - df_change$female_asian_progress_2018
+df_change$diff_asian_progress <- df_change$asian_progress - df_change$asian_progress_2018
+df_change$diff_female_nhpi_progress <- df_change$female_nhpi_progress - df_change$female_nhpi_progress_2018
+df_change$diff_nhpi_progress <- df_change$nhpi_progress - df_change$nhpi_progress_2018
+```
+
+```{r}
+# create a categorical dummy variable based on how much/what direction progress changed from 2018 to 2019
+df_change$female_category <- numeric(nrow(df_change))
+
+for (i in 1:nrow(df_change))
+{
+  if (df_change$diff_female_progress[i] < -.66) {
+    df_change$female_category[i] <- -3
+  } else if (df_change$diff_female_progress[i] < -.33) {
+    df_change$female_category[i] <- -2
+  } else if (df_change$diff_female_progress[i] < 0) {
+    df_change$female_category[i] <- -1
+  } else if (df_change$diff_female_progress[i] == 0) {
+    df_change$female_category[i] <- 0
+  } else if (df_change$diff_female_progress[i] < .33) {
+    df_change$female_category[i] <- 1
+  } else if (df_change$diff_female_progress[i] < .66) {
+    df_change$female_category[i] <- 2
+  } else {
+    df_change$female_category[i] <- 3
+  }
+}
+```
+
+```{r}
+# create a categorical dummy variable based on how much/what direction progress changed from 2018 to 2019
+df_change$female_hisp_category <- numeric(nrow(df_change))
+
+for (i in 1:nrow(df_change))
+{
+  if (df_change$diff_female_hisp_progress[i] < -.66) {
+    df_change$female_hisp_category[i] <- -3
+  } else if (df_change$diff_female_hisp_progress[i] < -.33) {
+    df_change$female_hisp_category[i] <- -2
+  } else if (df_change$diff_female_hisp_progress[i] < 0) {
+    df_change$female_hisp_category[i] <- -1
+  } else if (df_change$diff_female_hisp_progress[i] == 0) {
+    df_change$female_hisp_category[i] <- 0
+  } else if (df_change$diff_female_hisp_progress[i] < .33) {
+    df_change$female_hisp_category[i] <- 1
+  } else if (df_change$diff_female_hisp_progress[i] < .66) {
+    df_change$female_hisp_category[i] <- 2
+  } else {
+    df_change$female_hisp_category[i] <- 3
+  }
+}
+```
+
+```{r}
+# create a categorical dummy variable based on how much/what direction progress changed from 2018 to 2019
+df_change$hisp_category <- numeric(nrow(df_change))
+
+for (i in 1:nrow(df_change))
+{
+  if (df_change$diff_hisp_progress[i] < -.66) {
+    df_change$hisp_category[i] <- -3
+  } else if (df_change$diff_hisp_progress[i] < -.33) {
+    df_change$hisp_category[i] <- -2
+  } else if (df_change$diff_hisp_progress[i] < 0) {
+    df_change$hisp_category[i] <- -1
+  } else if (df_change$diff_hisp_progress[i] == 0) {
+    df_change$hisp_category[i] <- 0
+  } else if (df_change$diff_hisp_progress[i] < .33) {
+    df_change$hisp_category[i] <- 1
+  } else if (df_change$diff_hisp_progress[i] < .66) {
+    df_change$hisp_category[i] <- 2
+  } else {
+    df_change$hisp_category[i] <- 3
+  }
+}
+```
+
+```{r}
+# create a categorical dummy variable based on how much/what direction progress changed from 2018 to 2019
+df_change$female_baa_category <- numeric(nrow(df_change))
+
+for (i in 1:nrow(df_change))
+{
+  if (df_change$diff_female_baa_progress[i] < -.66) {
+    df_change$female_baa_category[i] <- -3
+  } else if (df_change$diff_female_baa_progress[i] < -.33) {
+    df_change$female_baa_category[i] <- -2
+  } else if (df_change$diff_female_baa_progress[i] < 0) {
+    df_change$female_baa_category[i] <- -1
+  } else if (df_change$diff_female_baa_progress[i] == 0) {
+    df_change$female_baa_category[i] <- 0
+  } else if (df_change$diff_female_baa_progress[i] < .33) {
+    df_change$female_baa_category[i] <- 1
+  } else if (df_change$diff_female_baa_progress[i] < .66) {
+    df_change$female_baa_category[i] <- 2
+  } else {
+    df_change$female_baa_category[i] <- 3
+  }
+}
+```
+
+```{r}
+# create a categorical dummy variable based on how much/what direction progress changed from 2018 to 2019
+df_change$baa_category <- numeric(nrow(df_change))
+
+for (i in 1:nrow(df_change))
+{
+  if (df_change$diff_baa_progress[i] < -.66) {
+    df_change$baa_category[i] <- -3
+  } else if (df_change$diff_baa_progress[i] < -.33) {
+    df_change$baa_category[i] <- -2
+  } else if (df_change$diff_baa_progress[i] < 0) {
+    df_change$baa_category[i] <- -1
+  } else if (df_change$diff_baa_progress[i] == 0) {
+    df_change$baa_category[i] <- 0
+  } else if (df_change$diff_baa_progress[i] < .33) {
+    df_change$baa_category[i] <- 1
+  } else if (df_change$diff_baa_progress[i] < .66) {
+    df_change$baa_category[i] <- 2
+  } else {
+    df_change$baa_category[i] <- 3
+  }
+}
+```
+
+```{r}
+# create a categorical dummy variable based on how much/what direction progress changed from 2018 to 2019
+df_change$female_aian_category <- numeric(nrow(df_change))
+
+for (i in 1:nrow(df_change))
+{
+  if (df_change$diff_female_aian_progress[i] < -.66) {
+    df_change$female_aian_category[i] <- -3
+  } else if (df_change$diff_female_aian_progress[i] < -.33) {
+    df_change$female_aian_category[i] <- -2
+  } else if (df_change$diff_female_aian_progress[i] < 0) {
+    df_change$female_aian_category[i] <- -1
+  } else if (df_change$diff_female_aian_progress[i] == 0) {
+    df_change$female_aian_category[i] <- 0
+  } else if (df_change$diff_female_aian_progress[i] < .33) {
+    df_change$female_aian_category[i] <- 1
+  } else if (df_change$diff_female_aian_progress[i] < .66) {
+    df_change$female_aian_category[i] <- 2
+  } else {
+    df_change$female_aian_category[i] <- 3
+  }
+}
+```
+
+```{r}
+# create a categorical dummy variable based on how much/what direction progress changed from 2018 to 2019
+df_change$aian_category <- numeric(nrow(df_change))
+
+for (i in 1:nrow(df_change))
+{
+  if (df_change$diff_aian_progress[i] < -.66) {
+    df_change$aian_category[i] <- -3
+  } else if (df_change$diff_aian_progress[i] < -.33) {
+    df_change$aian_category[i] <- -2
+  } else if (df_change$diff_aian_progress[i] < 0) {
+    df_change$aian_category[i] <- -1
+  } else if (df_change$diff_aian_progress[i] == 0) {
+    df_change$aian_category[i] <- 0
+  } else if (df_change$diff_aian_progress[i] < .33) {
+    df_change$aian_category[i] <- 1
+  } else if (df_change$diff_aian_progress[i] < .66) {
+    df_change$aian_category[i] <- 2
+  } else {
+    df_change$aian_category[i] <- 3
+  }
+}
+```
+
+```{r}
+# create a categorical dummy variable based on how much/what direction progress changed from 2018 to 2019
+df_change$female_asian_category <- numeric(nrow(df_change))
+
+for (i in 1:nrow(df_change))
+{
+  if (df_change$diff_female_asian_progress[i] < -.66) {
+    df_change$female_asian_category[i] <- -3
+  } else if (df_change$diff_female_asian_progress[i] < -.33) {
+    df_change$female_asian_category[i] <- -2
+  } else if (df_change$diff_female_asian_progress[i] < 0) {
+    df_change$female_asian_category[i] <- -1
+  } else if (df_change$diff_female_asian_progress[i] == 0) {
+    df_change$female_asian_category[i] <- 0
+  } else if (df_change$diff_female_asian_progress[i] < .33) {
+    df_change$female_asian_category[i] <- 1
+  } else if (df_change$diff_female_asian_progress[i] < .66) {
+    df_change$female_asian_category[i] <- 2
+  } else {
+    df_change$female_asian_category[i] <- 3
+  }
+}
+```
+
+```{r}
+# create a categorical dummy variable based on how much/what direction progress changed from 2018 to 2019
+df_change$asian_category <- numeric(nrow(df_change))
+
+for (i in 1:nrow(df_change))
+{
+  if (df_change$diff_asian_progress[i] < -.66) {
+    df_change$asian_category[i] <- -3
+  } else if (df_change$diff_asian_progress[i] < -.33) {
+    df_change$asian_category[i] <- -2
+  } else if (df_change$diff_asian_progress[i] < 0) {
+    df_change$asian_category[i] <- -1
+  } else if (df_change$diff_asian_progress[i] == 0) {
+    df_change$asian_category[i] <- 0
+  } else if (df_change$diff_asian_progress[i] < .33) {
+    df_change$asian_category[i] <- 1
+  } else if (df_change$diff_asian_progress[i] < .66) {
+    df_change$asian_category[i] <- 2
+  } else {
+    df_change$asian_category[i] <- 3
+  }
+}
+```
+
+```{r}
+# create a categorical dummy variable based on how much/what direction progress changed from 2018 to 2019
+df_change$female_nhpi_category <- numeric(nrow(df_change))
+
+for (i in 1:nrow(df_change))
+{
+  if (df_change$diff_female_nhpi_progress[i] < -.66) {
+    df_change$female_nhpi_category[i] <- -3
+  } else if (df_change$diff_female_nhpi_progress[i] < -.33) {
+    df_change$female_nhpi_category[i] <- -2
+  } else if (df_change$diff_female_nhpi_progress[i] < 0) {
+    df_change$female_nhpi_category[i] <- -1
+  } else if (df_change$diff_female_nhpi_progress[i] == 0) {
+    df_change$female_nhpi_category[i] <- 0
+  } else if (df_change$diff_female_nhpi_progress[i] < .33) {
+    df_change$female_nhpi_category[i] <- 1
+  } else if (df_change$diff_female_nhpi_progress[i] < .66) {
+    df_change$female_nhpi_category[i] <- 2
+  } else {
+    df_change$female_nhpi_category[i] <- 3
+  }
+}
+```
+
+```{r}
+# create a categorical dummy variable based on how much/what direction progress changed from 2018 to 2019
+df_change$nhpi_category <- numeric(nrow(df_change))
+
+for (i in 1:nrow(df_change))
+{
+  if (df_change$diff_nhpi_progress[i] < -.66) {
+    df_change$nhpi_category[i] <- -3
+  } else if (df_change$diff_nhpi_progress[i] < -.33) {
+    df_change$nhpi_category[i] <- -2
+  } else if (df_change$diff_nhpi_progress[i] < 0) {
+    df_change$nhpi_category[i] <- -1
+  } else if (df_change$diff_nhpi_progress[i] == 0) {
+    df_change$nhpi_category[i] <- 0
+  } else if (df_change$diff_nhpi_progress[i] < .33) {
+    df_change$nhpi_category[i] <- 1
+  } else if (df_change$diff_nhpi_progress[i] < .66) {
+    df_change$nhpi_category[i] <- 2
+  } else {
+    df_change$nhpi_category[i] <- 3
+  }
+}
+```
+
+```{r}
+# new df with less variables for the tableau change map
+
+df_change_sm <- df_change %>%
+  select(c("state", "female_diff", "female_hisp_diff", "hisp_diff", "female_baa_diff", "baa_diff", "female_aian_diff", "aian_diff", "female_asian_diff", "asian_diff", "female_nhpi_diff", "nhpi_diff", "female_category", "female_hisp_category", "hisp_category", "female_baa_category", "baa_category", "female_aian_category", "aian_category", "female_asian_category", "asian_category", "female_nhpi_category", "nhpi_category"))
+
+df_change_sm
+```
+
+```{r}
+# exporting the tableau change map data to a csv
+
+write.csv(df_change_sm, "/Users/liya/Desktop/Decade Project/tableau_change.csv", row.names = FALSE)
+```
+
+## Facts for the Tableau map writeups
+
+Least close to most close to equal representation.
+
+```{r}
+df_change[order(df_change$female_progress), c("state", "female_progress")]
+```
+
+Smallest population proportion to greatest population proportion.
+
+```{r}
+df_change[order(df_change$female_pop_prop), c("state", "female_pop_prop")]
+```
+
+Smallest firm proportion to greatest firm proportion. 
+
+```{r}
+df_change[order(df_change$female_firm_prop), c("state", "female_firm_prop")]
+```
+
+Percentage of states that are less than 50% of the way to equal representation. 
+
+```{r}
+length(df_change$female_progress[df_change$female_progress < 0.5])/nrow(df_change)*100
+```
+
+Average population proportion for all states. 
+
+```{r}
+mean(df_change$female_pop_prop)
+```
+
+Average firm proportion for all states. 
+
+```{r}
+mean(df_change$female_firm_prop)
+```
+
+Average progress for all states.
+
+```{r}
+mean(df_change$female_progress)
+```
+
+Total firms needed for all states (U.S.) to reach equal representation.
+
+```{r}
+sum(df_change$female_needed)
+```
+
+Total firms in all states.
+
+```{r}
+sum(df_change$female_firms)
+```
+
+Within race/ethnicity category, percentage of firms are owned by women.
+
+```{r}
+sum(df_change$female_asian_firms)/sum(df_change$asian_firms)
+```
+
